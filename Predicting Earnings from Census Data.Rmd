@@ -1,0 +1,203 @@
+---
+title: "Predicting Earning from Census Data"
+output: github_document
+date: "2022-12-22"
+---
+### About the Study and the Data Set  
+The US government regularly gathers data on demographics through a census. In this study, we will use information from the census to predict an individual's yearly income, specifically whether they earn more than $50,000. The data comes from the UCI Machine Learning Repository and is stored in the file census.csv. It includes information on 31,978 people in the US.  
+The dataset includes 13 variables: age, workclass, education, maritalstatus, occupation, relationship, race, sex, capitalgain, capitalloss, hoursperweek, nativecountry, and over50k. The age of the individual is given in years, and the workclass describes the individual's employment status (e.g., whether they work for the government or are self-employed). The education variable indicates the highest level of education the individual has completed. Maritalstatus indicates the individual's marital status, and occupation describes the type of work they do. The relationship variable specifies the individual's relationship to their household, and race and sex provide the individual's racial and gender identities. The capitalgain and capitalloss variables show the amount of money the individual gained or lost through the sale of assets in 1994. The hoursperweek variable indicates how many hours per week the individual works, and nativecountry specifies the individual's country of origin. Finally, the over50k variable indicates whether the individual earned more than $50,000 in 1994.  
+
+### EDA
+```{r}
+census = read.csv("census.csv")
+str(census)
+```
+```{r}
+barplot(table(census$over50k))
+```
+```{r}
+x = table(census$over50k)
+x[1]/nrow(census)
+```
+
+We can see that 75% of the records have earned less than or equal to 50k.   
+Let's start by building a logistic regression model. 
+
+### Splitting the Data
+
+```{r}
+library(caTools)
+set.seed(123)
+spl = sample.split(census$over50k, SplitRatio = 0.6)
+train = subset(census, spl == TRUE)
+test = subset(census, spl == FALSE)
+
+```
+
+
+### Building a Logistic Regression Model
+```{r}
+train$over50k = as.factor(train$over50k)
+test$over50k = as.factor(test$over50k)
+logModel = glm(over50k ~ ., data = train, family = "binomial")
+summary(logModel)
+```
+We can see that we have many significant variables to the model. Let's see the accuracy.  
+
+```{r}
+library(knitr)
+predglm = predict(logModel, newdata = test, type = "response")
+x = table(test$over50k, predglm >= 0.5)
+kable(x)
+```
+```{r}
+(x[1]+x[4])/sum(x)
+```
+The accuracy is almost 85%, not bad! Now, let's compare it to a base line model accuracy of the testing set. 
+
+```{r}
+kable(table(test$over50k))
+```
+```{r}
+table(test$over50k)[1]/nrow(test)
+```
+We can see that a base line model on the testing set that always predicts less than or equal to 50k is correct almost 76% of the times. Meaning, the logistic regression model beats this by only 9%.  
+Let's see the AUC of the logistic model
+```{r}
+#AUC calculations
+library(ROCR)
+ROCRpred = prediction(predglm, test$over50k)
+as.numeric(performance(ROCRpred, "auc")@y.values)
+```
+```{r}
+#ROC Plot
+ROCplotlog = performance(ROCRpred, "tpr", "fpr")
+plot(ROCplotlog)
+```
+
+Excellent! Let's see if we can further improve the model. 
+
+### Building a CART Model  
+
+Now that we have a model that can serve as good base line for understanding the siginificant variables, we can build a tree to see what variables are more important than the others. 
+
+```{r}
+library(rpart)
+library(rpart.plot)
+CARTmodel = rpart(over50k ~ ., data = train, method = "class")
+prp(CARTmodel)
+```
+Great! This is the power of a CART model. with a tree like this with only 4 splits, we can intrepret that relationship is the most significant variable followed by both capital gain and education level.  
+Let's see how accurate the CART model is.  
+```{r}
+predCART = predict(CARTmodel, newdata = test, type = "class")
+x = table(test$over50k, predCART)
+kable(x)
+```
+```{r}
+(x[1]+x[4]) / sum(x)
+```
+We can see that the CART model has an accuracy of almost 84%. And while it is lower than our logistic regression model, sometimes it is a good idea to trade some of the accuracy for the interpretabilty of the CART model.  
+
+### ROC and AUC of the CART model
+```{r}
+#AUC 
+predCART1 = predict(CARTmodel, newdata = test)
+ROCRpredtree = prediction(predCART1[,2], test$over50k)
+as.numeric(performance(ROCRpredtree, "auc")@y.values)
+```
+```{r}
+#ROC Plot
+rocplot = performance(ROCRpredtree, "tpr","fpr")
+plot(rocplot)
+
+```
+
+
+***We can observe that the ROC curve of the tree is less smooth than the logstic regression one, that is shown before. In fact, we can see that there exsist 5 breaking points on the curve each corresponding to end bucket / leaf of the tree. Furthermore, it is common for trees to have breaking points because the probabilties of the CART model takes only a handful of values.***  
+
+The AUC of the CART model is 0.84. Again, suggesting that the logistic regression is performing better.  
+
+### Selecting CP by Cross Validation   
+
+We will use k-fold cross validation with 10 folds to determine the optimal value of the cp (complexity parameter) for our CART model. This involves dividing the data into 10 equal-sized folds and training the model on 9 of the folds, using the remaining fold as the validation set. The process is repeated 10 times, with each fold serving as the validation set once. The cp value that results in the best performance (as measured by some metric, such as accuracy or F1 score) is chosen as the final value for the model.
+
+```{r}
+library(caret)
+set.seed(123)
+fitControl = trainControl(method = "cv", number = 10)
+cartGrid = expand.grid(.cp = seq(0.002, 0.1, 0.002))
+train(over50k ~. , data = train, method = "rpart",trControl = fitControl, tuneGrid = cartGrid) 
+```
+
+
+We can see the optimal cp is 0.002. Now let's build a new CART model with this value. 
+
+```{r}
+CARTmodelcv = rpart(over50k ~ ., data = train, method = "class", cp = 0.002)
+prp(CARTmodelcv)
+```
+
+
+Let's see the accuracy of it. 
+```{r}
+predCARTcv = predict(CARTmodelcv, newdata = test, type = "class")
+x = table(test$over50k, predCARTcv)
+kable(x)
+```
+```{r}
+#Accuracy
+(x[1]+x[4])/sum(x)
+```
+
+
+### Building a Random Forest model. 
+```{r}
+library(randomForest)
+set.seed(123)
+RFmodel = randomForest(over50k~ ., data= train)
+```
+```{r}
+predRFm = predict(RFmodel, newdata = test)
+x = table(test$over50k, predRFm)
+kable(x)
+```
+```{r}
+(x[1]+x[4])/sum(x)
+```
+The accuracy of the random forest model is 86% !.   
+
+
+We can assess the importance of different variables in a random forest model by examining how frequently they are selected for splits when the model is trained. This can be done by aggregating the number of times each variable is chosen for a split across all of the trees in the model. This gives us a measure of the overall importance of each variable in the model.  
+```{r}
+vu = varUsed(RFmodel, count = TRUE)
+vusorted = sort(vu, decreasing = FALSE, index.return = TRUE)
+dotchart(vusorted$x, names(RFmodel$forest$xlevels[vusorted$ix]))
+```
+
+
+
+The varUsed() function is used to calculate the variable importance for each variable in the model. The "count = TRUE" argument specifies that the importance should be calculated based on the number of times each variable is used in the model (as opposed to the reduction in impurity).  
+
+
+The resulting variable importance values are then sorted in ascending order using the sort() function, with the "decreasing = FALSE" argument specifying that the values should be sorted in ascending order. The "index.return = TRUE" argument specifies that the function should return the indices of the sorted values as well as the sorted values themselves.  
+
+
+Finally, the dotchart() function is used to create a dot chart visualization of the sorted variable importance values. The first argument to the function is the sorted variable importance values (vusorted\$x), and the second argument is a list of the variable names (names(RFmodel\$forest\$xlevels[vusorted\$ix])). This creates a dot chart with the variable names on the x-axis and the importance values on the y-axis, with the variables ordered from least to most important.  
+
+
+***We can see the most important variable in terms of the number of splits in the random forest model is Age***  
+
+
+Another way to measure the importance of variables in a random forest model is to calculate the average reduction in impurity that results from using each variable for a split. Impurity is a measure of how mixed or homogeneous the data in a particular node or leaf of the tree is. When a split is performed using a particular variable, the impurity is typically reduced. By averaging the reduction in impurity that results from using a variable for a split across all of the trees in the forest and all of the times the variable is selected for a split, we can get a measure of the overall importance of that variable in the model.
+
+```{r}
+varImpPlot(RFmodel)
+```
+
+
+
+***For instance, it can be see that the most important variable in terms of reduction of impurity is Capitalgain.***
+
+
+
